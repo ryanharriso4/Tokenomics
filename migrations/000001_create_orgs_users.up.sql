@@ -1,4 +1,3 @@
-
 CREATE TABLE IF NOT EXISTS organizations (
     org_id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL
