@@ -2,58 +2,67 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 )
 
-func main() {
-	// Load the .env file from the current directory
-	err := godotenv.Load()
-	if err != nil {
-		fmt.Println("Warning: No .env file found, falling back to system environment variables")
-	}
+type TransactionRequest struct {
+	OrgID          int    `json:"org_id"`
+	UserID         int    `json:"user_id"`
+	NumTokens      int    `json:"num_tokens"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
 
-	// Fetch variables loaded from your .env
+func main() {
+
+	_ = godotenv.Load()
+
+	dbName := os.Getenv("DB_NAME")
 	dbUser := os.Getenv("DB_USER")
 	dbPassword := os.Getenv("DB_PASSWORD")
-	dbName := os.Getenv("DB_NAME")
-	dbHost := "localhost" // Assuming running on your host machine
-	dbPort := "5432"
 
-	// Construct the secure connection string dynamically
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s",
-		dbUser, dbPassword, dbHost, dbPort, dbName,
-	)
+	dbURL := fmt.Sprintf("postgres://%s:%s@127.0.0.1:5433/%s?sslmode=disable", dbUser, dbPassword, dbName)
 
-	// Configure the connection pool
-	config, err := pgxpool.ParseConfig(connStr)
+	pool, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to parse connection string: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Unable to connect to database: %v\n", err)
 	}
-
-	// Set a connection timeout context
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Connect to the database pool
-	fmt.Println("Connecting to Docker Postgres securely using environment variables...")
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to create connection pool: %v\n", err)
-		os.Exit(1)
+	if err := pool.Ping(context.Background()); err != nil {
+		log.Fatalf("Postgres connection failed: %v\n", err)
 	}
+	log.Println("Connected to PostgreSQL!")
 	defer pool.Close()
 
-	// Ping the connection
-	err = pool.Ping(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Ping failed. Could not reach database: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("✅ Successfully connected and pinged the database!")
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /transactions", func(w http.ResponseWriter, r *http.Request) {
+		var req TransactionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		_, err := pool.Exec(r.Context(),
+			`INSERT INTO transactions (org_id, user_id, num_tokens, idempotency_key)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (idempotency_key) DO NOTHING`,
+			req.OrgID, req.UserID, req.NumTokens, req.IdempotencyKey,
+		)
+		if err != nil {
+			log.Printf("DB INSERT FAILED: %v\n", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	log.Println("Server listening on http://127.0.0.1:8080")
+	log.Fatal(http.ListenAndServe("127.0.0.1:8080", mux))
+
 }
