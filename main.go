@@ -47,19 +47,55 @@ func main() {
 			return
 		}
 
-		_, err := pool.Exec(r.Context(),
+		tx, err := pool.Begin(r.Context())
+		if err != nil {
+			log.Printf("Failed to start tx: %v\n", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		defer tx.Rollback(r.Context())
+
+		tag, err := tx.Exec(r.Context(),
 			`INSERT INTO transactions (org_id, user_id, num_tokens, idempotency_key)
 			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (idempotency_key) DO NOTHING`,
 			req.OrgID, req.UserID, req.NumTokens, req.IdempotencyKey,
 		)
+
 		if err != nil {
-			log.Printf("DB INSERT FAILED: %v\n", err)
+			log.Printf("Transaction insert failed: %v\n", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		if tag.RowsAffected() == 0 {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		var remaining int64
+		err = tx.QueryRow(r.Context(),
+			`UPDATE org_balances
+			 SET tokens_remaining = tokens_remaining - $1,
+			     updated_at = NOW()
+			 WHERE org_id = $2 AND tokens_remaining >= $1
+			 RETURNING tokens_remaining`,
+			req.NumTokens, req.OrgID,
+		).Scan(&remaining)
+
+		if err != nil {
+			http.Error(w, "token quota exceeded", http.StatusTooManyRequests)
+			return
+		}
+
+		if err := tx.Commit(r.Context()); err != nil {
+			log.Printf("Failed to commit tx: %v\n", err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
 		w.WriteHeader(http.StatusCreated)
+
 	})
 
 	log.Println("Server listening on http://127.0.0.1:8080")

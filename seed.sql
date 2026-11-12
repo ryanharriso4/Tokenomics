@@ -3,6 +3,7 @@ BEGIN;
 -- 1. Wipe existing test data and reset all SERIAL sequences back to 1
 TRUNCATE TABLE 
     transactions, 
+    org_balances,
     organization_users, 
     users, 
     organizations, 
@@ -32,6 +33,24 @@ SELECT
     ((i - 1) / 5) + 1 AS org_id,
     i AS user_id
 FROM generate_series(1, 50) AS i;
+
+-- 6. Initialize org_balances for all 10 organizations
+-- Orgs 1..4 get Plan 1 (1k tokens), Orgs 5..8 get Plan 2 (50k), Orgs 9..10 get Plan 3 (1M)
+INSERT INTO org_balances (org_id, plan_id, tokens_remaining)
+SELECT 
+    o.org_id,
+    CASE 
+        WHEN o.org_id <= 4 THEN 1
+        WHEN o.org_id <= 8 THEN 2
+        ELSE 3
+    END AS plan_id,
+    p.max AS tokens_remaining
+FROM organizations o
+JOIN plans p ON p.plan_id = CASE 
+    WHEN o.org_id <= 4 THEN 1
+    WHEN o.org_id <= 8 THEN 2
+    ELSE 3
+END;
 
 COMMIT;
 
